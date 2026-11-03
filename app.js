@@ -42,26 +42,40 @@ $('check').onclick=async()=>{
  else{
  if(!provider||!address)throw new Error('Connect your wallet first. No signature or transaction is needed.');
  const checkedAddress=address;
- chainId=await provider.request({method:'eth_chainId'});
- if(!chainNames[chainId])throw new Error('Switch your wallet to Ethereum mainnet or Sepolia, then try again. Other networks and ERC-20 tokens are not supported.');
+ chainId='0x'+BigInt(await provider.request({method:'eth_chainId'})).toString(16);
+ if(!chainNames[chainId])throw new Error('Connected wallet reports chain '+chainId+'. Select Ethereum mainnet (1) or Sepolia (11155111) for this site. Only native ETH is supported.');
  chain=chainNames[chainId];
  const accounts=await provider.request({method:'eth_accounts'});
  if(!accounts.some(a=>a.toLowerCase()===checkedAddress.toLowerCase()))throw new Error('Wallet access changed. Reconnect and try again.');
  const block=await provider.request({method:'eth_getBlockByNumber',params:['latest',false]});
  if(!block||!/^0x[\da-f]{64}$/i.test(block.hash)||!/^0x[\da-f]+$/i.test(block.number)||!/^0x[\da-f]+$/i.test(block.timestamp))throw new Error('The provider returned an invalid block.');
- const raw=await provider.request({method:'eth_getBalance',params:[checkedAddress,{blockHash:block.hash,requireCanonical:true}]});
- if(!/^0x[\da-f]+$/i.test(raw))throw new Error('The provider returned an invalid balance.');
+ // Use a block-number string for compatibility with wallet RPC providers.
+ // This remains an unsigned RPC check, not a private cryptographic proof.
+ const raw=await provider.request({
+   method:'eth_getBalance',
+   params:[checkedAddress,block.number]
+ });
+ const confirmedBlock=await provider.request({
+   method:'eth_getBlockByNumber',
+   params:[block.number,false]
+ });
+ if(!confirmedBlock || typeof confirmedBlock.hash!=='string' ||
+    confirmedBlock.hash.toLowerCase()!==block.hash.toLowerCase()){
+   throw new Error('The blockchain snapshot changed during the check. Please try again.');
+ }
+
+ if(typeof raw!=='string'||!/^0x[\da-f]+$/i.test(raw))throw new Error('The provider returned an invalid balance.');
  balanceWei=BigInt(raw);blockNumber=BigInt(block.number).toString();blockHash=block.hash;blockTimestamp=new Date(Number(BigInt(block.timestamp))*1000).toISOString();
- const finalChain=await provider.request({method:'eth_chainId'});
+ const finalChain='0x'+BigInt(await provider.request({method:'eth_chainId'})).toString(16);
  if(finalChain!==chainId)throw new Error('Network changed during the check. Please try again.');
  }
  if(token!==revision||currentMode!==mode)return;
  result={mode:currentMode,thresholdEth:formatEth(thresholdWei),balanceWei,meetsRequirement:balanceWei>=thresholdWei,chain,chainId,blockNumber,blockHash,blockTimestamp,checkedAt:new Date().toISOString()};render();
- }catch(e){if(token===revision)$('error').textContent=(e.message||'Check failed.')+(currentMode==='live'?' No proof was generated. Your provider must support EIP-1898 block-hash queries.':'');}
+ }catch(e){if(token===revision)$('error').textContent=(e.message||'Check failed.')+(currentMode==='live'?' No balance summary was generated.':'');}
  finally{busy=false;controls();}
 };
 function render(){const r=result;const pass=r.meetsRequirement;$('resultIcon').textContent=pass?'✓':'−';$('resultIcon').classList.toggle('fail',!pass);$('resultKicker').textContent=r.mode==='demo'?'SIMULATED RESULT':'RPC-REPORTED SNAPSHOT';$('resultTitle').textContent=pass?'Requirement met.':'Below the threshold.';$('resultDescription').textContent=(r.mode==='demo'?'The sample wallet':'The connected wallet')+(pass?' meets':' does not meet')+' your minimum balance requirement.';$('requirement').textContent='At least '+r.thresholdEth+' ETH';$('source').textContent=r.chain;$('block').textContent=r.blockNumber||'Synthetic · no onchain block';$('checkedAt').textContent=new Date(r.checkedAt).toLocaleString();$('balanceText').textContent='Omitted from summary';['copy','download','reveal'].forEach(id=>$(id).disabled=false);$('resultFoot').textContent=r.mode==='demo'?'Demo data only. This is not evidence of real funds.':'Unsigned RPC result. Not a cryptographic proof or ownership verification.';}
 $('reveal').onclick=()=>{if(!result)return;revealed=!revealed;$('balanceText').textContent=revealed?formatEth(result.balanceWei)+' ETH':'Omitted from summary';$('reveal').textContent=revealed?'Hide exact balance':'Show balance on this screen';};
-function report(){if(!result)throw new Error('Run a check first.');const r=result;return {schema:'balance-lab.summary.v1',evidenceType:r.mode==='demo'?'SIMULATED_NOT_A_PROOF':'UNSIGNED_RPC_SUMMARY_NOT_A_PROOF',asset:'native ETH',network:r.chain,chainId:r.chainId,requirement:{operator:'>=',amountEth:r.thresholdEth},meetsRequirement:r.meetsRequirement,blockNumber:r.blockNumber,blockHash:r.blockHash,blockTimestamp:r.blockTimestamp,checkedAt:r.checkedAt,excluded:['wallet address','exact balance','transaction history'],limitations:['Unsigned and editable; cannot independently verify this result.','No proof of ownership or zero-knowledge proof.','Snapshot only; balances can change and blocks can be reorganized.','Threshold and result disclose a bound on the balance.','Do not use for access, credit, rewards, or financial decisions.']};}
+function report(){if(!result)throw new Error('Run a check first.');const r=result;return {schema:'balance-lab.summary.v1',evidenceType:r.mode==='demo'?'SIMULATED_NOT_A_PROOF':'UNSIGNED_RPC_SUMMARY_NOT_A_PROOF',asset:'native ETH',network:r.chain,chainId:r.chainId,requirement:{operator:'>=',amountEth:r.thresholdEth},meetsRequirement:r.meetsRequirement,blockNumber:r.blockNumber,blockHash:r.blockHash,blockTimestamp:r.blockTimestamp,checkedAt:r.checkedAt,excluded:['wallet address','exact balance','transaction history'],limitations:['Unsigned and editable; cannot independently verify this result.','Relies on wallet RPC accuracy; a block-number query and hash recheck are not cryptographic verification.','No proof of ownership or zero-knowledge proof.','Snapshot only; balances can change and blocks can be reorganized.','Threshold and result disclose a bound on the balance.','Do not use for access, credit, rewards, or financial decisions.']};}
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(JSON.stringify(report(),null,2));toast('Unsigned summary copied.');}catch(e){toast('Clipboard unavailable. Use Download JSON instead.');}};
 $('download').onclick=()=>{const blob=new Blob([JSON.stringify(report(),null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='balance-'+(result.mode==='demo'?'demo':'unsigned')+'-summary.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('Summary downloaded. No address or exact balance included.');};
